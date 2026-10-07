@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Club 1962 HQ</title>
+<meta name="description" content="Sales, stock, expenses, customers and monthly plans for Club 1962.">
+<meta name="theme-color" content="#0c6b3b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Club 1962">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<section class="login" id="login" hidden>
+  <form id="loginForm" class="login-card" novalidate>
+    <div class="brand"><b>Club <span>1962</span></b><small>Company HQ</small></div>
+    <p class="muted">Sign in to see sales, stock and plans.</p>
+    <div class="f"><label for="lgUser">Username</label><input id="lgUser" autocomplete="username" autocapitalize="none" required></div>
+    <div class="f"><label for="lgPass">Password</label><input id="lgPass" type="password" autocomplete="current-password" required></div>
+    <p class="login-err" id="lgErr" role="alert"></p>
+    <button class="btn primary" id="lgBtn" type="submit">Sign in</button>
+  </form>
+</section>
+
+<div class="app" id="appShell">
+  <aside class="rail">
+    <div class="brand"><b>Club <span>1962</span></b><small>Company HQ</small></div>
+    <nav id="nav" aria-label="Sections"></nav>
+    <div class="rail-foot">
+      <div class="sync" id="sync"><i></i><span>Connecting…</span></div>
+      <button class="btn sm" id="acctBtn" hidden>Account</button>
+    </div>
+  </aside>
+  <main id="main">
+    <div class="head">
+      <div><h1 id="title">Overview</h1><p id="subtitle"></p></div>
+      <div class="actions" id="actions"></div>
+    </div>
+    <div id="view"></div>
+  </main>
+</div>
+
+<dialog id="dlg"><form id="dlgForm" method="dialog" novalidate>
+  <header><h3 id="dlgTitle">Edit</h3></header>
+  <div class="fields" id="dlgFields"></div>
+  <footer><button type="button" class="btn danger" id="dlgDelete">Delete</button><span class="spacer"></span><button type="button" class="btn" id="dlgCancel">Cancel</button><button type="submit" class="btn primary" id="dlgSave">Save</button></footer>
+</form></dialog>
+
+<dialog id="cfm"><form method="dialog" style="padding:20px;gap:14px;display:flex;flex-direction:column">
+  <p id="cfmText" style="margin:0;font-weight:600"></p>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" value="no">Cancel</button><button class="btn primary" value="yes" id="cfmYes">Confirm</button></div>
+</form></dialog>
+
+<dialog id="acct"><form id="acctForm" method="dialog" novalidate>
+  <header><h3 id="acctTitle">Account</h3></header>
+  <div class="fields one" id="acctBody"></div>
+  <footer><span class="spacer"></span><button type="button" class="btn" id="acctClose">Close</button></footer>
+</form></dialog>
+
+<input type="file" id="restoreFile" accept=".json,application/json" hidden>
+<datalist id="dl-products"></datalist><datalist id="dl-colors"></datalist><datalist id="dl-customers"></datalist><datalist id="dl-categories"></datalist><datalist id="dl-platforms"></datalist>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# One-click hosting on Render (https://render.com): New > Blueprint > pick this repo.
+# The database lives on Neon (free Postgres that doesn't expire). See README.md.
+services:
+  - type: web
+    name: club-1962-hq
+    runtime: node
+    plan: free
+    region: virginia
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false
+      - key: OWNER_USERNAME
+        sync: false
+      - key: OWNER_PASSWORD
+        sync: false
+      - key: OWNER_NAME
+        sync: false

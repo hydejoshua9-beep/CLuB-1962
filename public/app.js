@@ -1,0 +1,864 @@
+(() => {
+"use strict";
+
+/* ---------- Schema ---------- */
+const COLS = ["sales", "inventory", "expenses", "marketing", "customers", "suppliers", "plans", "ideas"];
+const SIZES = ["", "XS", "S", "M", "L", "XL", "XXL"];
+const SCHEMA = {
+  sales: { one: "sale", fields: [
+    { k: "date", l: "Date", t: "date", req: 1 }, { k: "order", l: "Order #" },
+    { k: "customer", l: "Customer", list: "dl-customers", req: 1 }, { k: "product", l: "Product", list: "dl-products", req: 1 },
+    { k: "size", l: "Size", t: "select", o: SIZES }, { k: "color", l: "Color", list: "dl-colors" },
+    { k: "qty", l: "Quantity", t: "number", step: "1", def: 1 }, { k: "price", l: "Unit price ($)", t: "number", step: "0.01" },
+    { k: "payment", l: "Payment method", t: "select", o: ["Zelle", "Cash", "Online", "Card", "Free", "Other"] },
+    { k: "status", l: "Payment status", t: "select", o: ["Paid", "Pending", "Free"] },
+    { k: "note", l: "Note", t: "textarea", full: 1 } ] },
+  inventory: { one: "stock item", fields: [
+    { k: "sku", l: "Product ID" }, { k: "product", l: "Product", list: "dl-products", req: 1 },
+    { k: "size", l: "Size", t: "select", o: SIZES }, { k: "color", l: "Color", list: "dl-colors" },
+    { k: "stock", l: "Original stock (units)", t: "number", step: "1" }, { k: "reorder", l: "Low-stock alert at", t: "number", step: "1", def: 2 },
+    { k: "cost", l: "Cost per unit ($)", t: "number", step: "0.01" }, { k: "price", l: "Selling price ($)", t: "number", step: "0.01" } ] },
+  expenses: { one: "expense", fields: [
+    { k: "date", l: "Date", t: "date", req: 1 }, { k: "category", l: "Category", list: "dl-categories", req: 1 },
+    { k: "description", l: "Description" }, { k: "vendor", l: "Vendor" },
+    { k: "amount", l: "Amount ($)", t: "number", step: "0.01", req: 1 }, { k: "note", l: "Notes" } ] },
+  marketing: { one: "campaign", fields: [
+    { k: "date", l: "Date", t: "date" }, { k: "campaign", l: "Campaign", req: 1 }, { k: "platform", l: "Platform", list: "dl-platforms" },
+    { k: "spent", l: "Amount spent ($)", t: "number", step: "0.01" }, { k: "reach", l: "Reach", t: "number", step: "1" },
+    { k: "followers", l: "Followers gained", t: "number", step: "1" }, { k: "sales", l: "Sales generated ($)", t: "number", step: "0.01" },
+    { k: "note", l: "Note", t: "textarea", full: 1 } ] },
+  customers: { one: "customer", fields: [
+    { k: "name", l: "Customer name", req: 1, list: "dl-customers" }, { k: "phone", l: "Phone" }, { k: "email", l: "Email" },
+    { k: "instagram", l: "Instagram" }, { k: "note", l: "Notes", t: "textarea", full: 1 } ] },
+  suppliers: { one: "supplier", fields: [
+    { k: "name", l: "Supplier name", req: 1 }, { k: "product", l: "Product" }, { k: "cost", l: "Cost per item ($)", t: "number", step: "0.01" },
+    { k: "lead", l: "Lead time" }, { k: "location", l: "Location" }, { k: "contact", l: "Contact info" }, { k: "note", l: "Notes", t: "textarea", full: 1 } ] },
+  plans: { one: "monthly plan", fields: [
+    { k: "month", l: "Month", t: "month", req: 1 }, { k: "theme", l: "Theme / headline" },
+    { k: "revenueTarget", l: "Revenue target ($)", t: "number", step: "1" }, { k: "unitsTarget", l: "Units target", t: "number", step: "1" },
+    { k: "budget", l: "Marketing budget ($)", t: "number", step: "1" }, { k: "newCustomersTarget", l: "New customers target", t: "number", step: "1" },
+    { k: "tasksText", l: "Tasks (one per line)", t: "textarea", full: 1 }, { k: "focus", l: "Focus & notes", t: "textarea", full: 1 },
+    { k: "review", l: "End-of-month review (what worked, what to change)", t: "textarea", full: 1 } ] },
+  ideas: { one: "improvement", fields: [
+    { k: "title", l: "Improvement", req: 1, full: 1 },
+    { k: "area", l: "Area", t: "select", o: ["Sales", "Payments", "Inventory", "Marketing", "Finance", "Operations", "Customers", "Suppliers"] },
+    { k: "status", l: "Status", t: "select", o: ["Idea", "In progress", "Done"] },
+    { k: "impact", l: "Impact", t: "select", o: ["High", "Medium", "Low"] }, { k: "effort", l: "Effort", t: "select", o: ["Low", "Medium", "High"] },
+    { k: "owner", l: "Owner" }, { k: "due", l: "Target date", t: "date" },
+    { k: "detail", l: "Details / how", t: "textarea", full: 1 } ] }
+};
+
+/* ---------- State & storage ---------- */
+const S = Object.fromEntries(COLS.map(c => [c, []]));
+const UI = { view: "overview", q: "", month: "", status: "", cat: "", plan: "", hideStock: false };
+let db = null, mode = "loading", canWrite = true, loaded = new Set();
+const LS = "club1962-data-v1";
+
+try { const h = location.hash.slice(1); if (h) UI.view = h; } catch (e) {}
+try { const t = localStorage.getItem("club1962-ui"); if (t) Object.assign(UI, JSON.parse(t), { q: "" }); } catch (e) {}
+function saveUI() { try { localStorage.setItem("club1962-ui", JSON.stringify({ view: UI.view, plan: UI.plan, hideStock: UI.hideStock })); } catch (e) {} }
+
+function loadLocal() {
+  try { const d = JSON.parse(localStorage.getItem(LS) || "null"); if (d) COLS.forEach(c => S[c] = Array.isArray(d[c]) ? d[c] : []); } catch (e) {}
+}
+function persistLocal() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) { toast("Could not save in this browser. Use Backup to keep a copy."); } }
+
+/* ---------- Hosted server (Render) ---------- */
+let me = null, offline = false, live = null, asOf = 0;
+async function api(method, path, body) {
+  let res;
+  try { res = await fetch("/api" + path, { method, credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" }, body: body === undefined ? undefined : JSON.stringify(body) }); }
+  catch (e) { const err = new Error("No connection. Check your internet and try again."); err.status = 0; throw err; }
+  let data = null; try { data = await res.json(); } catch (e) {}
+  if (!res.ok) { const err = new Error((data && data.error) || "Something went wrong. Try again."); err.status = res.status; if (res.status === 401 && path !== "/login" && path !== "/me/password") showLogin(); throw err; }
+  return { data, cached: res.headers.get("X-From-Cache") === "1", cachedAt: Number(res.headers.get("X-Cached-At") || 0) };
+}
+async function loadServer() {
+  try {
+    const r = await api("GET", "/state");
+    COLS.forEach(c => S[c] = Array.isArray(r.data[c]) ? r.data[c] : []);
+    offline = r.cached; asOf = r.cachedAt; canWrite = !offline;
+    COLS.forEach(c => loaded.add(c));
+  } catch (e) { if (e.status !== 401) { offline = true; canWrite = false; COLS.forEach(c => loaded.add(c)); } }
+  schedule();
+}
+let reloadT;
+function startLive() {
+  if (live || !window.EventSource) return;
+  live = new EventSource("/api/events");
+  live.addEventListener("change", () => { clearTimeout(reloadT); reloadT = setTimeout(loadServer, 150); });
+  live.onopen = () => { if (offline) loadServer(); };
+}
+function showLogin() {
+  me = null;
+  if (live) { live.close(); live = null; }
+  COLS.forEach(c => S[c] = []);
+  document.getElementById("appShell").hidden = true;
+  document.getElementById("login").hidden = false;
+  document.getElementById("acctBtn").hidden = true;
+  setTimeout(() => { const u = document.getElementById("lgUser"); if (u) u.focus(); });
+}
+async function startServer(user) {
+  me = user; mode = "server";
+  document.getElementById("login").hidden = true;
+  document.getElementById("appShell").hidden = false;
+  document.getElementById("acctBtn").hidden = false;
+  await loadServer();
+  if (!offline) startLive();
+}
+document.getElementById("loginForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = document.getElementById("lgBtn"), err = document.getElementById("lgErr");
+  err.textContent = ""; btn.disabled = true;
+  try {
+    const r = await api("POST", "/login", { username: document.getElementById("lgUser").value, password: document.getElementById("lgPass").value });
+    document.getElementById("lgPass").value = "";
+    await startServer(r.data.user);
+  } catch (ex) { err.textContent = ex.message; }
+  btn.disabled = false;
+});
+window.addEventListener("online", () => { if (mode === "server" && me) { loadServer(); startLive(); } });
+window.addEventListener("offline", () => { if (mode === "server") { offline = true; canWrite = false; schedule(); } });
+
+async function init() {
+  render();
+  const hosted = !window.claude && /^https?:$/.test(location.protocol);
+  if (hosted) {
+    try {
+      const r = await api("GET", "/me");
+      if (r.cached) offline = true;
+      return startServer(r.data.user);
+    } catch (e) {
+      if (e.status === 401) return;          // the sign-in screen is showing
+      if (e.status !== 404) { document.getElementById("view").innerHTML = `<div class="panel"><div class="empty">Can't reach the Club 1962 server. Check your connection and reload.</div></div>`; return; }
+    }
+  }
+  let c = null;
+  try { c = window.claude && window.claude.use ? await window.claude.use("db") : null; } catch (e) { c = null; }
+  if (c) {
+    db = c; mode = "cloud";
+    try { const u = await window.claude.use("user"); if (u) { const w = await u.can("data.write"); if (w === false) canWrite = false; } } catch (e) {}
+    COLS.forEach(col => {
+      db.collection(col).limit(1000).onSnapshot(snap => {
+        S[col] = snap.docs.map(d => Object.assign({ id: d.id }, d.data()));
+        loaded.add(col); schedule();
+      }, err => { loaded.add(col); if (err && err.code === "revoked") { canWrite = false; } schedule(); });
+    });
+  } else {
+    mode = "local"; loadLocal(); COLS.forEach(c2 => loaded.add(c2));
+  }
+  render();
+}
+let pending = false;
+function schedule() { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; render(); }); }
+
+function newId(prefix) { return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+async function saveDoc(col, rec) {
+  if (!canWrite) { toast(offline ? "You're offline. Changes are paused until you reconnect." : "You have view-only access to this page."); return false; }
+  const id = rec.id || newId(col.slice(0, 2));
+  const body = Object.assign({}, rec); delete body.id;
+  if (mode === "server") {
+    try { await api("PUT", "/docs/" + col + "/" + encodeURIComponent(id), body); }
+    catch (e) { toast(e.message); return false; }
+    const i = S[col].findIndex(r => r.id === id), full = Object.assign({ id }, body);
+    if (i >= 0) S[col][i] = full; else S[col].push(full);
+    schedule();
+  } else if (mode === "cloud") {
+    try { await db.collection(col).doc(id).set(body); }
+    catch (e) {
+      if (e && e.code === "invalid_argument") { canWrite = false; toast("This page is read-only for you. Ask the owner for edit access."); }
+      else if (e && e.code === "quota_exceeded") toast("Storage is full. Delete old records to add new ones.");
+      else toast("Could not save. Check your connection and try again.");
+      return false;
+    }
+  } else {
+    const i = S[col].findIndex(r => r.id === id);
+    const full = Object.assign({ id }, body);
+    if (i >= 0) S[col][i] = full; else S[col].push(full);
+    persistLocal(); render();
+  }
+  return id;
+}
+async function deleteDoc(col, id) {
+  if (!canWrite) { toast(offline ? "You're offline. Changes are paused until you reconnect." : "You have view-only access to this page."); return; }
+  if (mode === "server") {
+    try { await api("DELETE", "/docs/" + col + "/" + encodeURIComponent(id)); S[col] = S[col].filter(r => r.id !== id); schedule(); }
+    catch (e) { toast(e.message); }
+    return;
+  }
+  if (mode === "cloud") { try { await db.collection(col).doc(id).delete(); } catch (e) { toast("Could not delete. Try again."); } }
+  else { S[col] = S[col].filter(r => r.id !== id); persistLocal(); render(); }
+}
+
+/* ---------- Helpers ---------- */
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+const N = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+const norm = s => String(s || "").trim().toUpperCase();
+const money = (v, dp) => { const n = N(v); const s = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: dp ? 2 : 0, maximumFractionDigits: dp ? 2 : 0 }); return (n < 0 ? "−$" : "$") + s; };
+const money2 = v => money(v, true);
+const int = v => Math.round(N(v)).toLocaleString("en-US");
+const pct = v => (isFinite(v) ? Math.round(v * 100) : 0) + "%";
+const monthOf = d => String(d || "").slice(0, 7);
+const monthName = (m, long) => { if (!m) return "—"; const [y, mo] = m.split("-").map(Number); return new Date(y, mo - 1, 1).toLocaleString("en-US", { month: long ? "long" : "short" }) + (long ? " " + y : ""); };
+const fmtDate = d => { if (!d) return "—"; const [y, m, dd] = d.split("-").map(Number); return new Date(y, m - 1, dd).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); };
+const today = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
+const thisMonth = () => today().slice(0, 7);
+const lineTotal = s => N(s.qty) * N(s.price);
+const sum = (arr, f) => arr.reduce((a, x) => a + N(f(x)), 0);
+const byDateDesc = (a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.order || "").localeCompare(String(a.order || ""), undefined, { numeric: true });
+const isStockExpense = e => /stock|inventory/i.test(e.category || "");
+
+/* ---------- Derived numbers (mirror the Excel formulas) ---------- */
+function matchInv(s) {
+  const p = norm(s.product), z = norm(s.size), c = norm(s.color);
+  return S.inventory.find(i => norm(i.product) === p && norm(i.size) === z && norm(i.color) === c)
+      || S.inventory.find(i => norm(i.product) === p);
+}
+function invRows() {
+  return S.inventory.map(i => {
+    const p = norm(i.product), z = norm(i.size), c = norm(i.color);
+    const sold = sum(S.sales.filter(s => norm(s.product) === p && norm(s.size) === z && norm(s.color) === c), s => s.qty);
+    const onHand = N(i.stock) - sold;
+    return Object.assign({}, i, { sold, onHand, value: onHand * N(i.price), costValue: Math.max(onHand, 0) * N(i.cost),
+      margin: N(i.price) - N(i.cost), sellThrough: N(i.stock) ? sold / N(i.stock) : 0 });
+  });
+}
+function totals() {
+  const revenue = sum(S.sales, lineTotal);
+  const paid = sum(S.sales.filter(s => norm(s.status) === "PAID"), lineTotal);
+  const pendingRows = S.sales.filter(s => norm(s.status) === "PENDING");
+  const outstanding = sum(pendingRows, lineTotal);
+  const expenses = sum(S.expenses, e => e.amount);
+  const units = sum(S.sales, s => s.qty);
+  const orders = new Set(S.sales.map(s => s.order || s.id)).size;
+  const cogs = sum(S.sales, s => { const i = matchInv(s); return i ? N(i.cost) * N(s.qty) : 0; });
+  const inv = invRows();
+  const stockUnits = sum(inv, i => Math.max(i.onHand, 0));
+  const stockValue = sum(inv, i => i.value);
+  const stockCost = sum(inv, i => i.costValue);
+  const projected = sum(S.inventory, i => N(i.stock) * N(i.price));
+  const prod = {};
+  S.sales.forEach(s => { const k = (s.product || "Unlabelled").trim(); prod[k] = prod[k] || { units: 0, rev: 0 }; prod[k].units += N(s.qty); prod[k].rev += lineTotal(s); });
+  const products = Object.entries(prod).map(([name, v]) => Object.assign({ name }, v)).sort((a, b) => b.units - a.units);
+  return { revenue, paid, outstanding, pendingRows, expenses, net: revenue - expenses, units, orders, cogs, gross: revenue - cogs, inv, stockUnits, stockValue, stockCost, projected, products, aov: orders ? revenue / orders : 0 };
+}
+function months() {
+  const set = new Set();
+  S.sales.forEach(s => s.date && set.add(monthOf(s.date)));
+  S.expenses.forEach(e => e.date && set.add(monthOf(e.date)));
+  return [...set].sort();
+}
+function monthStats(m) {
+  const sales = S.sales.filter(s => monthOf(s.date) === m);
+  const exp = S.expenses.filter(e => monthOf(e.date) === m);
+  const firstSeen = {};
+  S.sales.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach(s => { const k = norm(s.customer); if (k && !firstSeen[k]) firstSeen[k] = monthOf(s.date); });
+  const newCust = Object.values(firstSeen).filter(v => v === m).length;
+  return { rev: sum(sales, lineTotal), units: sum(sales, s => s.qty), exp: sum(exp, e => e.amount), opex: sum(exp.filter(e => !isStockExpense(e)), e => e.amount),
+    mkt: sum(exp.filter(e => /ads|marketing/i.test(e.category || "")), e => e.amount) + sum(S.marketing.filter(c => monthOf(c.date) === m), c => c.spent),
+    orders: new Set(sales.map(s => s.order || s.id)).size, newCust, pending: sum(sales.filter(s => norm(s.status) === "PENDING"), lineTotal) };
+}
+function customersDerived() {
+  const map = {};
+  S.sales.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach(s => {
+    const k = norm(s.customer); if (!k) return;
+    const c = map[k] = map[k] || { key: k, name: String(s.customer).trim(), orders: new Set(), units: 0, spent: 0, owed: 0, first: s.date, last: s.date, products: {} };
+    c.name = String(s.customer).trim(); c.orders.add(s.order || s.id); c.units += N(s.qty); c.spent += lineTotal(s); c.last = s.date;
+    if (norm(s.status) === "PENDING") c.owed += lineTotal(s);
+    if (s.product) c.products[s.product] = (c.products[s.product] || 0) + N(s.qty);
+  });
+  S.customers.forEach(r => { const k = norm(r.name); if (!map[k]) map[k] = { key: k, name: r.name, orders: new Set(), units: 0, spent: 0, owed: 0, first: "", last: "", products: {} }; map[k].rec = r; });
+  return Object.values(map).map(c => Object.assign(c, { orderCount: c.orders.size, fav: Object.entries(c.products).sort((a, b) => b[1] - a[1])[0] })).sort((a, b) => b.spent - a.spent);
+}
+
+/* ---------- Insights for the Efficiency view ---------- */
+function insights() {
+  const t = totals(), out = [];
+  if (t.pendingRows.length) {
+    const who = [...new Set(t.pendingRows.map(s => String(s.customer).trim()))];
+    out.push({ sev: "bad", area: "Payments", title: `${money(t.outstanding)} unpaid across ${t.pendingRows.length} sales`,
+      body: `Still owed by ${who.slice(0, 6).join(", ")}${who.length > 6 ? " and " + (who.length - 6) + " more" : ""}. Send reminders every Friday and ask for Zelle or online payment before handing over items.`,
+      idea: "Collect all pending payments and require payment before delivery", go: "sales", filter: { status: "Pending" } });
+  }
+  const unmatched = {};
+  S.sales.forEach(s => { if (!matchInv(s)) { const k = (s.product || "").trim() || "(no product)"; unmatched[k] = (unmatched[k] || 0) + N(s.qty); } });
+  const um = Object.entries(unmatched);
+  if (um.length) out.push({ sev: "warn", area: "Inventory", title: `${um.length} products are sold but not in Inventory`,
+    body: `${um.map(([k, v]) => `${k} (${v} sold)`).join(", ")}. Their stock and profit can't be tracked. Add them as stock items, and pick products from the dropdown when logging sales so names always match.`,
+    idea: "Add every product to Inventory and use the dropdown when logging sales", go: "inventory" });
+  const slow = t.inv.filter(i => i.onHand >= 3 && i.sellThrough < 0.35).sort((a, b) => b.onHand * N(b.cost) - a.onHand * N(a.cost));
+  if (slow.length) {
+    const tied = sum(slow, i => i.onHand * N(i.cost));
+    out.push({ sev: "warn", area: "Inventory", title: `${money(tied)} of cash tied up in slow sizes`,
+      body: `Slowest movers: ${slow.slice(0, 5).map(i => `${i.product} ${i.size} (${i.onHand} left, ${pct(i.sellThrough)} sold)`).join("; ")}. Bundle them (hoodie + tee), run a size-specific promo, and order fewer of these sizes next drop.`,
+      idea: "Clear slow sizes with bundles and adjust the size mix on the next order", go: "inventory" });
+  }
+  const neg = t.inv.filter(i => i.onHand < 0);
+  if (neg.length) out.push({ sev: "bad", area: "Inventory", title: `${neg.length} stock items show more sold than you had`,
+    body: `${neg.map(i => `${i.product} ${i.size} ${i.color} (${i.onHand})`).join("; ")}. Either the starting stock is wrong or a sale was logged with the wrong size or color. Do a quick physical count.`,
+    idea: "Monthly physical stock count to correct inventory", go: "inventory" });
+  let leak = 0, leakN = 0;
+  S.sales.forEach(s => { const i = matchInv(s); if (i && norm(s.status) !== "FREE" && N(s.price) > 0 && N(s.price) < N(i.price)) { leak += (N(i.price) - N(s.price)) * N(s.qty); leakN++; } });
+  if (leakN) out.push({ sev: "warn", area: "Sales", title: `${money(leak)} given away in discounts`,
+    body: `${leakN} sales were below the selling price set in Inventory. If that price is out of date, update it there. Otherwise, some discounting is fine, but set fixed promo prices (for example a friends price and a bundle price) so every discount is a choice.`,
+    idea: "Set a fixed price list with planned promo prices", go: "sales" });
+  const free = S.sales.filter(s => norm(s.status) === "FREE" || norm(s.payment) === "FREE" || N(s.price) === 0);
+  if (free.length) {
+    const cost = sum(free, s => { const i = matchInv(s); return i ? N(i.cost) * N(s.qty) : 0; });
+    out.push({ sev: "info", area: "Marketing", title: `${free.length} free items given out (about ${money(cost)} at cost)`,
+      body: "Treat giveaways as marketing: give them to people who will post or wear them publicly and note who got them, so you can see if they bring sales.", go: "sales" });
+  }
+  const web = S.expenses.filter(e => /web|shopify|ionos|domain/i.test((e.category || "") + (e.vendor || "") + (e.description || "")));
+  if (web.length) {
+    const ms = new Set(web.map(e => monthOf(e.date))).size || 1;
+    out.push({ sev: "info", area: "Finance", title: `Website tools cost ${money(sum(web, e => e.amount))} so far (about ${money(sum(web, e => e.amount) / ms)}/month)`,
+      body: "You pay both Shopify and IONOS. Check whether the domain and site can live in one place, and move to an annual plan if it saves money.",
+      idea: "Consolidate Shopify and IONOS website costs", go: "expenses" });
+  }
+  const mSpent = sum(S.marketing, c => c.spent), mSales = sum(S.marketing, c => c.sales), mFol = sum(S.marketing, c => c.followers);
+  if (S.marketing.length) out.push({ sev: mSales > mSpent ? "good" : "warn", area: "Marketing",
+    title: mSales > mSpent ? `Ads returned ${money(mSales)} on ${money(mSpent)}` : `Paid ads: ${money(mSpent)} spent, ${money(mSales)} in sales`,
+    body: mSales > mSpent ? "Keep funding the campaigns that pay back." : `That is ${mFol ? money(mSpent / mFol, true) + " per follower" : "no followers gained"}. Try customer photos, try-on videos and pre-order posts before paying for more ads, and record sales per campaign.`,
+    idea: "Track sales per campaign and test organic content before paid ads", go: "marketing" });
+  const low = t.inv.filter(i => i.onHand >= 0 && i.onHand <= N(i.reorder || 2) && i.sellThrough >= 0.5);
+  if (low.length) out.push({ sev: "warn", area: "Suppliers", title: `${low.length} best-selling sizes are nearly sold out`,
+    body: `${low.slice(0, 6).map(i => `${i.product} ${i.size} (${i.onHand} left)`).join("; ")}. Suppliers take 3–4 weeks, so reorder now or open pre-orders for the next drop.`,
+    idea: "Reorder best-selling sizes 4 weeks before they sell out", go: "inventory" });
+  const cs = customersDerived().filter(c => c.orderCount);
+  const repeat = cs.filter(c => c.orderCount > 1).length;
+  if (cs.length) out.push({ sev: "good", area: "Customers", title: `${repeat} of ${cs.length} customers came back (${pct(repeat / cs.length)})`,
+    body: `Your top customers are ${cs.slice(0, 3).map(c => c.name).join(", ")}. Give repeat buyers early access to the next drop and save their phone or Instagram in Customers.`,
+    idea: "Early-access list for repeat customers", go: "customers" });
+  return out;
+}
+
+/* ---------- Views ---------- */
+const VIEWS = {};
+const NAV = [
+  ["overview", "Overview"], ["sales", "Sales"], ["inventory", "Inventory"], ["expenses", "Expenses"], "-",
+  ["customers", "Customers"], ["marketing", "Marketing"], ["suppliers", "Suppliers"], "-",
+  ["plans", "Monthly plans"], ["efficiency", "Efficiency"]
+];
+
+function table(cols, rows, col, foot) {
+  if (!rows.length) return `<div class="tablewrap"><div class="empty">Nothing here yet.</div></div>`;
+  return `<div class="tablewrap"><table><thead><tr>${cols.map(c => `<th class="${c.num ? "num" : ""}">${esc(c.h)}</th>`).join("")}</tr></thead><tbody>${
+    rows.map(r => `<tr${col && r.id ? ` data-col="${col}" data-id="${esc(r.id)}"` : r._key ? ` data-cust="${esc(r._key)}" data-id="c"` : ""}>${cols.map(c => `<td class="${c.num ? "num" : ""} ${c.cls || ""}">${c.f(r)}</td>`).join("")}</tr>`).join("")
+  }</tbody>${foot ? `<tfoot><tr>${cols.map(c => `<td class="${c.num ? "num" : ""}">${foot[c.h] != null ? foot[c.h] : ""}</td>`).join("")}</tr></tfoot>` : ""}</table></div>`;
+}
+const statusChip = s => { const v = norm(s); return `<span class="chip ${v === "PAID" ? "good" : v === "PENDING" ? "bad" : v === "FREE" ? "gold" : ""}">${esc(s || "—")}</span>`; };
+const bars = (items, fmt, gold) => { const max = Math.max(...items.map(i => i.v), 1); return `<div class="bars">${items.map(i => `<div class="bar"><span title="${esc(i.k)}">${esc(i.k)}</span><div class="track"><div class="fill ${gold ? "gold" : ""}" style="width:${Math.max(2, i.v / max * 100)}%"></div></div><span>${fmt(i.v)}</span></div>`).join("")}</div>`; };
+const progress = (label, actual, target, fmt) => { const p = target ? actual / target : 0; return `<div class="progress"><div class="top"><span>${esc(label)}</span><span>${fmt(actual)}${target ? " of " + fmt(target) + " · " + pct(p) : ""}</span></div><div class="track"><div class="fill ${p >= 1 ? "over" : ""}" style="width:${Math.min(100, p * 100)}%"></div></div></div>`; };
+
+function niceMax(v) { const raw = v / 4; const mag = Math.pow(10, Math.floor(Math.log10(raw || 1))); const n = raw / mag; const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag; return { max: step * 4, step }; }
+function monthChart(ms) {
+  if (!ms.length) return `<div class="empty">Log a sale or expense to see the monthly chart.</div>`;
+  const rows = ms.map(m => { const st = monthStats(m); return { m, rev: st.rev, exp: UI.hideStock ? st.opex : st.exp }; });
+  const W = 660, H = 240, L = 52, R = 8, T = 14, B = 26;
+  const { max, step } = niceMax(Math.max(...rows.map(r => Math.max(r.rev, r.exp)), 1));
+  const y = v => T + (H - T - B) * (1 - v / max);
+  const bw = (W - L - R) / rows.length, w = Math.min(22, bw * 0.34);
+  let g = `<g class="grid">`;
+  for (let v = 0; v <= max + 1e-9; v += step) g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${money(v)}</text>`;
+  g += `</g>`;
+  const marks = rows.map((r, i) => { const cx = L + bw * i + bw / 2;
+    return `<g><title>${monthName(r.m, 1)}: revenue ${money2(r.rev)}, expenses ${money2(r.exp)}</title>
+      <rect x="${cx - w - 1}" y="${y(r.rev)}" width="${w}" height="${Math.max(0, y(0) - y(r.rev))}" rx="2" fill="var(--accent)"/>
+      <rect x="${cx + 1}" y="${y(r.exp)}" width="${w}" height="${Math.max(0, y(0) - y(r.exp))}" rx="2" fill="var(--gold)"/>
+      <text x="${cx}" y="${H - 8}" text-anchor="middle">${monthName(r.m)}</text></g>`; }).join("");
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly revenue and expenses">${g}${marks}</svg></div>`;
+}
+
+VIEWS.overview = {
+  sub: () => "Everything from the Main sheet, live: money in, money out, stock and what needs attention.",
+  html() {
+    const t = totals(), ms = months(), cm = thisMonth(), plan = S.plans.find(p => p.month === cm), st = monthStats(cm);
+    const alerts = insights().filter(i => i.sev === "bad" || i.sev === "warn").slice(0, 4);
+    return `<div style="display:flex;flex-direction:column;gap:16px">
+    <div class="kpis">
+      <div class="kpi hero"><label>Net profit</label><strong class="${t.net < 0 ? "neg" : ""}">${money(t.net)}</strong><small>Revenue minus all expenses</small></div>
+      <div class="kpi"><label>Total revenue</label><strong>${money(t.revenue)}</strong><small>${money(t.paid)} collected</small></div>
+      <div class="kpi"><label>Total expenses</label><strong>${money(t.expenses)}</strong><small>incl. stock purchases</small></div>
+      <div class="kpi"><label>Gross profit</label><strong>${money(t.gross)}</strong><small>${t.revenue ? pct(t.gross / t.revenue) : "0%"} margin after unit cost</small></div>
+      <div class="kpi"><label>Units sold</label><strong>${int(t.units)}</strong><small>${int(t.orders)} orders · ${money(t.aov)} avg order</small></div>
+      <div class="kpi"><label>Unpaid</label><strong class="${t.outstanding ? "neg" : ""}">${money(t.outstanding)}</strong><small>${t.pendingRows.length} pending sales</small></div>
+      <div class="kpi"><label>Inventory value</label><strong>${money(t.stockValue)}</strong><small>${int(t.stockUnits)} units on hand at retail</small></div>
+    </div>
+    <div class="grid2">
+      <section class="panel"><h2>Revenue vs expenses <small>by month</small></h2>
+        <div class="legend"><span><i style="background:var(--accent)"></i>Revenue</span><span><i style="background:var(--gold)"></i>Expenses</span>
+        <label><input type="checkbox" id="hideStock" ${UI.hideStock ? "checked" : ""}> Hide stock purchases</label></div>
+        ${monthChart(ms)}</section>
+      <section class="panel"><h2>Best sellers <small>units sold · best: ${esc(t.products[0] ? t.products[0].name : "—")}</small></h2>
+        ${t.products.length ? bars(t.products.slice(0, 8).map(p => ({ k: p.name, v: p.units })), v => int(v) + " sold") : `<div class="empty">No sales yet.</div>`}</section>
+    </div>
+    <div class="grid2 even">
+      <section class="panel"><h2>Needs attention <button class="btn sm" data-go="efficiency">All checks</button></h2>
+        ${alerts.length ? `<div class="alerts">${alerts.map(alertHtml).join("")}</div>` : `<div class="empty">All clear.</div>`}</section>
+      <section class="panel"><h2>${monthName(cm, 1)} plan <button class="btn sm" data-go="plans">Open plans</button></h2>
+        ${plan ? `${plan.theme ? `<b>${esc(plan.theme)}</b>` : ""}
+          ${progress("Revenue", st.rev, N(plan.revenueTarget), money)}${progress("Units", st.units, N(plan.unitsTarget), int)}
+          ${taskList(plan, 5)}` : `<div class="empty">No plan for ${monthName(cm, 1)} yet.<br><br><button class="btn primary" data-newplan="${cm}">Create this month's plan</button></div>`}</section>
+    </div>
+    <section class="panel"><h2>Inventory snapshot <small>projected value of original stock ${money(t.projected)} · cost of what's left ${money(t.stockCost)}</small></h2>
+      ${bars(groupInv(t.inv).map(g => ({ k: g.product, v: g.onHand })), v => int(v) + " left", true)}</section>
+    </div>`;
+  }
+};
+function groupInv(inv) { const m = {}; inv.forEach(i => { const k = String(i.product).trim(); m[k] = m[k] || { product: k, onHand: 0, sold: 0, stock: 0 }; m[k].onHand += Math.max(i.onHand, 0); m[k].sold += i.sold; m[k].stock += N(i.stock); }); return Object.values(m); }
+function alertHtml(a, i) {
+  return `<div class="alert ${a.sev}"><span class="sev"></span><div><b>${esc(a.title)}</b><p>${esc(a.body)}</p>
+    <div class="row"><span class="chip">${esc(a.area)}</span>${a.go ? `<button class="btn sm" data-go="${a.go}" ${a.filter ? `data-status="${esc(a.filter.status)}"` : ""}>Open ${esc(a.go)}</button>` : ""}${a.idea ? `<button class="btn sm" data-idea="${esc(a.idea)}" data-area="${esc(a.area)}">Add to improvement plan</button>` : ""}</div></div></div>`;
+}
+function taskList(plan, limit) {
+  const tasks = plan.tasks || [];
+  if (!tasks.length) return `<p class="note">No tasks yet. Edit the plan to add some.</p>`;
+  const list = limit ? tasks.slice(0, limit) : tasks;
+  const done = tasks.filter(x => x.done).length;
+  return `<p class="note" style="margin:0">${done} of ${tasks.length} tasks done</p><ul class="tasks">${list.map((x, i) => `<li class="${x.done ? "done" : ""}"><input type="checkbox" id="task-${esc(plan.id)}-${i}" data-plan="${esc(plan.id)}" data-task="${i}" ${x.done ? "checked" : ""}><span><label for="task-${esc(plan.id)}-${i}">${esc(x.t)}</label></span></li>`).join("")}</ul>`;
+}
+
+VIEWS.sales = {
+  sub: () => "Every order, with live totals. Filter by month or payment status; click a row to edit.",
+  actions: () => `<button class="btn primary" data-add="sales">+ Log a sale</button>`,
+  html() {
+    const ms = months().slice().reverse();
+    return `<div style="display:flex;flex-direction:column;gap:12px"><div class="toolbar">
+      <input type="search" id="q" placeholder="Search customer, product, order #…" value="${esc(UI.q)}" aria-label="Search sales">
+      <select id="fMonth" aria-label="Month"><option value="">All months</option>${ms.map(m => `<option value="${m}" ${UI.month === m ? "selected" : ""}>${monthName(m, 1)}</option>`).join("")}</select>
+      <select id="fStatus" aria-label="Status"><option value="">All statuses</option>${["Paid", "Pending", "Free"].map(s => `<option ${UI.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
+      <span class="sum" id="sum"></span></div><div id="tbl">${this.table()}</div></div>`;
+  },
+  table() {
+    const q = UI.q.trim().toLowerCase();
+    const rows = S.sales.filter(s => (!UI.month || monthOf(s.date) === UI.month) && (!UI.status || norm(s.status) === norm(UI.status))
+      && (!q || [s.customer, s.product, s.order, s.color, s.size, s.note, s.payment].join(" ").toLowerCase().includes(q))).sort(byDateDesc);
+    setTimeout(() => { const el = document.getElementById("sum"); if (el) el.textContent = `${rows.length} sales · ${int(sum(rows, s => s.qty))} units · ${money2(sum(rows, lineTotal))}`; });
+    return table([
+      { h: "Date", f: s => fmtDate(s.date) }, { h: "Order", f: s => `<span class="mono">${esc(s.order)}</span>` },
+      { h: "Customer", f: s => esc(s.customer) }, { h: "Product", f: s => esc(s.product) + (matchInv(s) ? "" : ` <span class="chip warn" title="Not in inventory">untracked</span>`) },
+      { h: "Size", f: s => esc(s.size) }, { h: "Color", f: s => esc(s.color) },
+      { h: "Qty", num: 1, f: s => int(s.qty) }, { h: "Unit price", num: 1, f: s => money2(s.price) }, { h: "Total", num: 1, f: s => `<b>${money2(lineTotal(s))}</b>` },
+      { h: "Payment", f: s => esc(s.payment) }, { h: "Status", f: s => statusChip(s.status) }, { h: "Note", cls: "wrap", f: s => esc(s.note) }
+    ], rows, "sales", { Date: "Total", Qty: int(sum(rows, s => s.qty)), Total: money2(sum(rows, lineTotal)) });
+  }
+};
+
+VIEWS.inventory = {
+  sub: () => "Stock left is calculated from your sales automatically, the same way the spreadsheet did.",
+  actions: () => `<button class="btn primary" data-add="inventory">+ Add stock item</button>`,
+  html() {
+    const t = totals();
+    return `<div style="display:flex;flex-direction:column;gap:16px"><div class="kpis">
+      <div class="kpi"><label>Current inventory value</label><strong>${money(t.stockValue)}</strong><small>on hand × selling price</small></div>
+      <div class="kpi"><label>Projected value (original stock)</label><strong>${money(t.projected)}</strong><small>original stock × selling price</small></div>
+      <div class="kpi"><label>Cash tied up in stock</label><strong>${money(t.stockCost)}</strong><small>on hand × cost per unit</small></div>
+      <div class="kpi"><label>Profit still to earn</label><strong>${money(sum(t.inv, i => Math.max(i.onHand, 0) * i.margin))}</strong><small>if everything left sells at list price</small></div>
+    </div>
+    <div class="toolbar"><input type="search" id="q" placeholder="Search product, size, color…" value="${esc(UI.q)}" aria-label="Search inventory"></div>
+    <div id="tbl">${this.table()}</div></div>`;
+  },
+  table() {
+    const q = UI.q.trim().toLowerCase();
+    const rows = invRows().filter(i => !q || [i.sku, i.product, i.size, i.color].join(" ").toLowerCase().includes(q));
+    const stat = i => i.onHand < 0 ? `<span class="chip bad">Check count</span>` : i.onHand === 0 ? `<span class="chip bad">Sold out</span>` : i.onHand <= N(i.reorder || 2) ? `<span class="chip warn">Low</span>` : `<span class="chip good">In stock</span>`;
+    return table([
+      { h: "ID", f: i => `<span class="mono">${esc(i.sku)}</span>` }, { h: "Product", f: i => esc(i.product) }, { h: "Size", f: i => esc(i.size) }, { h: "Color", f: i => esc(i.color) },
+      { h: "Original", num: 1, f: i => int(i.stock) }, { h: "Sold", num: 1, f: i => int(i.sold) }, { h: "On hand", num: 1, f: i => `<b class="${i.onHand < 0 ? "neg" : ""}">${int(i.onHand)}</b>` },
+      { h: "Sold %", num: 1, f: i => pct(i.sellThrough) }, { h: "Cost", num: 1, f: i => money2(i.cost) }, { h: "Price", num: 1, f: i => money2(i.price) },
+      { h: "Margin", num: 1, f: i => `${money2(i.margin)} <span class="muted">${N(i.price) ? pct(i.margin / N(i.price)) : ""}</span>` },
+      { h: "Stock value", num: 1, f: i => money2(i.value) }, { h: "Status", f: stat }
+    ], rows, "inventory", { ID: "Total", Original: int(sum(rows, i => i.stock)), Sold: int(sum(rows, i => i.sold)), "On hand": int(sum(rows, i => i.onHand)), "Stock value": money2(sum(rows, i => i.value)) });
+  }
+};
+
+VIEWS.expenses = {
+  sub: () => "Every dollar out. Categories add up on their own.",
+  actions: () => `<button class="btn primary" data-add="expenses">+ Add expense</button>`,
+  html() {
+    const cats = {}; S.expenses.forEach(e => { const k = (e.category || "Other").trim(); cats[k] = (cats[k] || 0) + N(e.amount); });
+    const catList = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+    const ms = months().slice().reverse();
+    return `<div style="display:flex;flex-direction:column;gap:16px"><div class="grid2">
+      <section class="panel"><h2>Spending by category <small>${money2(sum(S.expenses, e => e.amount))} total</small></h2>${catList.length ? bars(catList.map(([k, v]) => ({ k, v })), money, true) : `<div class="empty">No expenses yet.</div>`}</section>
+      <section class="panel"><h2>Monthly running costs <small>excluding stock</small></h2>${bars(months().map(m => ({ k: monthName(m, 1), v: monthStats(m).opex })), money2)}</section>
+    </div>
+    <div class="toolbar"><input type="search" id="q" placeholder="Search description, vendor…" value="${esc(UI.q)}" aria-label="Search expenses">
+      <select id="fMonth" aria-label="Month"><option value="">All months</option>${ms.map(m => `<option value="${m}" ${UI.month === m ? "selected" : ""}>${monthName(m, 1)}</option>`).join("")}</select>
+      <select id="fCat" aria-label="Category"><option value="">All categories</option>${catList.map(([k]) => `<option ${UI.cat === k ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></div>
+    <div id="tbl">${this.table()}</div></div>`;
+  },
+  table() {
+    const q = UI.q.trim().toLowerCase();
+    const rows = S.expenses.filter(e => (!UI.month || monthOf(e.date) === UI.month) && (!UI.cat || (e.category || "Other").trim() === UI.cat)
+      && (!q || [e.description, e.vendor, e.category, e.note].join(" ").toLowerCase().includes(q))).sort(byDateDesc);
+    return table([{ h: "Date", f: e => fmtDate(e.date) }, { h: "Category", f: e => `<span class="chip ${isStockExpense(e) ? "accent" : ""}">${esc(e.category)}</span>` },
+      { h: "Description", f: e => esc(e.description) }, { h: "Vendor", f: e => esc(e.vendor) }, { h: "Amount", num: 1, f: e => `<b>${money2(e.amount)}</b>` }, { h: "Notes", cls: "wrap", f: e => esc(e.note) }],
+      rows, "expenses", { Date: "Total", Amount: money2(sum(rows, e => e.amount)) });
+  }
+};
+
+VIEWS.customers = {
+  sub: () => "Built from your sales automatically. Click a customer to save their phone, email or Instagram.",
+  actions: () => `<button class="btn primary" data-add="customers">+ Add customer details</button>`,
+  html() {
+    const cs = customersDerived().filter(c => c.orderCount);
+    const repeat = cs.filter(c => c.orderCount > 1).length;
+    return `<div style="display:flex;flex-direction:column;gap:16px"><div class="kpis">
+      <div class="kpi"><label>Customers</label><strong>${int(cs.length)}</strong><small>people who have bought</small></div>
+      <div class="kpi"><label>Repeat customers</label><strong>${cs.length ? pct(repeat / cs.length) : "0%"}</strong><small>${repeat} bought more than once</small></div>
+      <div class="kpi"><label>Avg spend per customer</label><strong>${money(cs.length ? sum(cs, c => c.spent) / cs.length : 0)}</strong><small>lifetime</small></div>
+      <div class="kpi"><label>Contacts saved</label><strong>${int(S.customers.length)}</strong><small>with phone, email or notes</small></div>
+    </div>
+    <div class="toolbar"><input type="search" id="q" placeholder="Search customers…" value="${esc(UI.q)}" aria-label="Search customers"></div>
+    <div id="tbl">${this.table()}</div></div>`;
+  },
+  table() {
+    const q = UI.q.trim().toLowerCase();
+    const rows = customersDerived().filter(c => !q || [c.name, c.rec && c.rec.phone, c.rec && c.rec.email, c.rec && c.rec.note].join(" ").toLowerCase().includes(q)).map(c => Object.assign(c, { _key: c.key }));
+    return table([{ h: "Customer", f: c => `<b>${esc(c.name)}</b>${c.orderCount > 2 ? ` <span class="chip gold">Loyal</span>` : ""}` },
+      { h: "Orders", num: 1, f: c => int(c.orderCount) }, { h: "Items", num: 1, f: c => int(c.units) }, { h: "Spent", num: 1, f: c => money2(c.spent) },
+      { h: "Owes", num: 1, f: c => c.owed ? `<span class="neg">${money2(c.owed)}</span>` : "—" }, { h: "Favourite", f: c => c.fav ? esc(c.fav[0]) : "—" },
+      { h: "Last order", f: c => fmtDate(c.last) }, { h: "Phone", f: c => esc(c.rec && c.rec.phone) }, { h: "Email", f: c => esc(c.rec && c.rec.email) }, { h: "Notes", cls: "wrap", f: c => esc(c.rec && c.rec.note) }],
+      rows, null);
+  }
+};
+
+VIEWS.marketing = {
+  sub: () => "Track every campaign and see what each follower and sale really cost.",
+  actions: () => `<button class="btn primary" data-add="marketing">+ Add campaign</button>`,
+  html() {
+    const sp = sum(S.marketing, c => c.spent), fo = sum(S.marketing, c => c.followers), re = sum(S.marketing, c => c.reach), sa = sum(S.marketing, c => c.sales);
+    return `<div style="display:flex;flex-direction:column;gap:16px"><div class="kpis">
+      <div class="kpi"><label>Spent on campaigns</label><strong>${money(sp)}</strong><small>${S.marketing.length} campaigns</small></div>
+      <div class="kpi"><label>Reach</label><strong>${int(re)}</strong><small>${re ? money2(sp / re * 1000) : "—"} per 1,000 people</small></div>
+      <div class="kpi"><label>Followers gained</label><strong>${int(fo)}</strong><small>${fo ? money2(sp / fo) + " each" : "—"}</small></div>
+      <div class="kpi"><label>Return on ad spend</label><strong>${sp ? (sa / sp).toFixed(1) + "×" : "—"}</strong><small>${money(sa)} sales from ads</small></div>
+    </div>
+    ${table([{ h: "Date", f: c => fmtDate(c.date) }, { h: "Campaign", f: c => esc(c.campaign) }, { h: "Platform", f: c => esc(c.platform) },
+      { h: "Spent", num: 1, f: c => money2(c.spent) }, { h: "Reach", num: 1, f: c => int(c.reach) }, { h: "Followers", num: 1, f: c => int(c.followers) },
+      { h: "Per follower", num: 1, f: c => N(c.followers) ? money2(N(c.spent) / N(c.followers)) : "—" }, { h: "Sales", num: 1, f: c => money2(c.sales) },
+      { h: "Profit", num: 1, f: c => { const p = N(c.sales) - N(c.spent); return `<span class="${p < 0 ? "neg" : ""}">${money2(p)}</span>`; } }, { h: "Note", cls: "wrap", f: c => esc(c.note) }],
+      S.marketing.slice().sort(byDateDesc), "marketing")}</div>`;
+  }
+};
+
+VIEWS.suppliers = {
+  sub: () => "Who makes your products, what they charge and how long they take.",
+  actions: () => `<button class="btn primary" data-add="suppliers">+ Add supplier</button>`,
+  html() {
+    const stockBy = {}; S.expenses.filter(isStockExpense).forEach(e => { const k = norm((e.vendor || "") + " " + (e.note || "")); S.suppliers.forEach(s => { if (k.includes(norm(s.name).slice(0, 4))) stockBy[s.name] = (stockBy[s.name] || 0) + N(e.amount); }); });
+    return table([{ h: "Supplier", f: s => `<b>${esc(s.name)}</b>` }, { h: "Product", f: s => esc(s.product) }, { h: "Cost / item", num: 1, f: s => money2(s.cost) },
+      { h: "Lead time", f: s => esc(s.lead) }, { h: "Location", f: s => esc(s.location) }, { h: "Contact", f: s => esc(s.contact) },
+      { h: "Bought so far", num: 1, f: s => stockBy[s.name] ? money2(stockBy[s.name]) : "—" }, { h: "Notes", cls: "wrap", f: s => esc(s.note) }],
+      S.suppliers.slice().sort((a, b) => String(a.name).localeCompare(String(b.name))), "suppliers")
+      + `<p class="note">"Bought so far" matches stock expenses whose vendor or notes mention the supplier's name.</p>`;
+  }
+};
+
+VIEWS.plans = {
+  sub: () => "Set targets and tasks for each month, then compare with what actually happened.",
+  actions: () => `<button class="btn primary" data-newplan="">+ New monthly plan</button>`,
+  html() {
+    const plans = S.plans.slice().sort((a, b) => String(a.month).localeCompare(String(b.month)));
+    if (!UI.plan || !plans.find(p => p.id === UI.plan)) UI.plan = (plans.find(p => p.month === thisMonth()) || plans[plans.length - 1] || {}).id || "";
+    const p = plans.find(x => x.id === UI.plan);
+    const strip = `<div class="monthstrip">${plans.map(x => { const done = (x.tasks || []).filter(t => t.done).length, n = (x.tasks || []).length;
+      return `<button data-plansel="${esc(x.id)}" aria-pressed="${x.id === UI.plan}"><b>${monthName(x.month)} ${String(x.month).slice(2, 4)}</b><small>${esc(x.theme || "No theme")}</small><small>${n ? done + "/" + n + " tasks" : "No tasks"}</small></button>`; }).join("")}
+      <button class="new" data-newplan="">+ Add month</button></div>`;
+    if (!p) return strip + `<div class="panel"><div class="empty">No monthly plans yet. Create one to set targets and tasks.</div></div>`;
+    const st = monthStats(p.month);
+    const prev = (() => { const [y, m] = p.month.split("-").map(Number); const d = new Date(y, m - 2, 1); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); })();
+    const ps = monthStats(prev);
+    const isFuture = p.month > thisMonth();
+    return `<div style="display:flex;flex-direction:column;gap:16px">${strip}
+      <div class="grid2">
+        <section class="panel"><h2>${monthName(p.month, 1)} ${p.theme ? `<small>${esc(p.theme)}</small>` : ""}<button class="btn sm" data-edit="plans" data-eid="${esc(p.id)}">Edit plan</button></h2>
+          ${progress("Revenue", st.rev, N(p.revenueTarget), money)}
+          ${progress("Units sold", st.units, N(p.unitsTarget), int)}
+          ${progress("New customers", st.newCust, N(p.newCustomersTarget), int)}
+          ${progress("Marketing spend vs budget", st.mkt, N(p.budget), money)}
+          <p class="note" style="margin:0">${isFuture ? "This month hasn't started; actuals fill in as you log sales and expenses." : `Actuals so far: ${st.orders} orders, ${money(st.exp)} spent, ${money(st.pending)} still unpaid. Last month: ${money(ps.rev)} revenue, ${int(ps.units)} units.`}</p>
+        </section>
+        <section class="panel"><h2>Tasks</h2>${taskList(p)}</section>
+      </div>
+      <div class="grid2 even">
+        <section class="panel"><h2>Focus & notes</h2><p style="margin:0;white-space:pre-wrap">${esc(p.focus) || `<span class="muted">Nothing written yet.</span>`}</p></section>
+        <section class="panel"><h2>End-of-month review</h2><p style="margin:0;white-space:pre-wrap">${esc(p.review) || `<span class="muted">At month end, write what worked and what to change next month.</span>`}</p></section>
+      </div></div>`;
+  }
+};
+
+VIEWS.efficiency = {
+  sub: () => "Checks that run on your numbers every time they change, plus your improvement plan.",
+  actions: () => `<button class="btn primary" data-add="ideas">+ Add improvement</button>`,
+  html() {
+    const ins = insights();
+    const cols = ["Idea", "In progress", "Done"];
+    const rank = { High: 0, Medium: 1, Low: 2 };
+    const next = { "Idea": "In progress", "In progress": "Done" };
+    const board = cols.map(c => { const items = S.ideas.filter(i => (i.status || "Idea") === c).sort((a, b) => (rank[a.impact] ?? 1) - (rank[b.impact] ?? 1));
+      return `<div class="col"><h3><span>${c}</span><span class="muted">${items.length}</span></h3>${items.map(i => `<div class="card" data-col="ideas" data-id="${esc(i.id)}">
+        <b>${esc(i.title)}</b>${i.detail ? `<p>${esc(i.detail.length > 140 ? i.detail.slice(0, 140) + "…" : i.detail)}</p>` : ""}
+        <div class="meta"><span class="chip">${esc(i.area || "General")}</span><span class="chip ${i.impact === "High" ? "accent" : ""}">${esc(i.impact || "Medium")} impact</span><span class="chip ${i.effort === "Low" ? "good" : i.effort === "High" ? "warn" : ""}">${esc(i.effort || "Medium")} effort</span>${i.owner ? `<span class="chip">${esc(i.owner)}</span>` : ""}
+        ${next[c] ? `<button class="btn sm" data-advance="${esc(i.id)}" data-to="${next[c]}">${c === "Idea" ? "Start" : "Mark done"}</button>` : ""}</div></div>`).join("") || `<p class="note" style="padding:4px">Nothing here.</p>`}</div>`; }).join("");
+    return `<div style="display:flex;flex-direction:column;gap:16px">
+      <section class="panel"><h2>What your numbers say <small>${ins.length} checks</small></h2><div class="alerts">${ins.map(alertHtml).join("") || `<div class="empty">Add sales to get checks.</div>`}</div></section>
+      <section class="panel"><h2>Improvement plan <small>High-impact, low-effort first</small></h2><div class="board">${board}</div></section>
+      <section class="panel"><h2>Weekly routine</h2><ul class="tasks">${[
+        "Monday: log last week's sales and expenses here (10 minutes).",
+        "Wednesday: check Inventory for Low and Sold-out sizes; message the supplier if a best seller is under 3.",
+        "Friday: send payment reminders to everyone in Sales → Pending.",
+        "Last day of the month: fill in the review on this month's plan and create next month's plan."
+      ].map(x => `<li><span>${esc(x)}</span></li>`).join("")}</ul></section></div>`;
+  }
+};
+
+/* ---------- Render ---------- */
+function render() {
+  if (!VIEWS[UI.view]) UI.view = "overview";
+  const counts = { sales: S.sales.length, inventory: S.inventory.length, expenses: S.expenses.length, customers: customersDerived().filter(c => c.orderCount).length, marketing: S.marketing.length, suppliers: S.suppliers.length, plans: S.plans.length, efficiency: S.ideas.filter(i => i.status !== "Done").length };
+  document.getElementById("nav").innerHTML = NAV.map(n => n === "-" ? `<span class="sep"></span>` : `<button data-view="${n[0]}" ${UI.view === n[0] ? 'aria-current="page"' : ""}><span>${n[1]}</span>${counts[n[0]] != null ? `<span class="count">${counts[n[0]]}</span>` : ""}</button>`).join("");
+  const sync = document.getElementById("sync");
+  sync.className = "sync " + (mode === "server" ? (offline ? "local" : "cloud") : mode);
+  sync.querySelector("span").textContent = mode === "server" ? (offline ? "Offline · showing saved data" + (asOf ? " from " + new Date(asOf).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "") : "Online · " + (me ? me.name : "")) : mode === "cloud" ? (canWrite ? "Saved online · syncs live" : "View only") : mode === "local" ? "Saved in this browser only" : "Connecting…";
+  const v = VIEWS[UI.view];
+  document.getElementById("title").textContent = NAV.find(n => n[0] === UI.view)[1];
+  document.getElementById("subtitle").textContent = v.sub();
+  document.getElementById("actions").innerHTML = (v.actions ? v.actions() : "") + `<button class="btn" id="exportX">Export to Excel</button><button class="btn" id="backup">Backup</button><button class="btn" id="restore">Restore</button>`;
+  const viewEl = document.getElementById("view");
+  const empty = COLS.every(c => !S[c].length);
+  if (mode === "loading" || ((mode === "cloud" || mode === "server") && loaded.size < COLS.length && empty)) { viewEl.innerHTML = `<div class="panel"><div class="empty">Loading your Club 1962 data…</div></div>`; return; }
+  if (empty) { viewEl.innerHTML = `<div class="panel"><div class="empty"><b>No data yet.</b><br>Start by logging a sale or adding stock, or use <b>Restore</b> to load a backup file (club1962-backup.json).<br><br><button class="btn primary" data-add="sales">+ Log your first sale</button> <button class="btn" data-add="inventory">+ Add stock item</button></div></div>`; fillLists(); return; }
+  const f = document.activeElement, fid = f && f.id, sel = f && f.selectionStart;
+  viewEl.innerHTML = v.html();
+  fillLists();
+  if (fid === "q") { const el = document.getElementById("q"); if (el) { el.focus(); try { el.setSelectionRange(sel, sel); } catch (e) {} } }
+}
+function fillLists() {
+  const uniq = arr => [...new Set(arr.map(x => String(x || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const opt = arr => arr.map(x => `<option value="${esc(x)}"></option>`).join("");
+  document.getElementById("dl-products").innerHTML = opt(uniq(S.inventory.map(i => i.product)));
+  document.getElementById("dl-colors").innerHTML = opt(uniq(S.inventory.map(i => i.color).concat(S.sales.map(s => s.color))));
+  document.getElementById("dl-customers").innerHTML = opt(uniq(S.sales.map(s => s.customer).concat(S.customers.map(c => c.name))));
+  document.getElementById("dl-categories").innerHTML = opt(uniq(["Stock", "Website", "Marketing", "Ads", "Shipping", "Packaging", "Duty & fees", "Registration", "Other"].concat(S.expenses.map(e => e.category))));
+  document.getElementById("dl-platforms").innerHTML = opt(uniq(["Instagram", "TikTok", "Facebook", "Pop-up", "Word of mouth"].concat(S.marketing.map(m => m.platform))));
+}
+
+/* ---------- Forms ---------- */
+const dlg = document.getElementById("dlg");
+let editing = null;
+function openForm(col, rec, preset) {
+  const sc = SCHEMA[col], isNew = !rec;
+  rec = Object.assign({}, rec || {}, preset || {});
+  if (col === "plans" && rec.tasks && rec.tasksText == null) rec.tasksText = rec.tasks.map(t => t.t).join("\n");
+  if (isNew) sc.fields.forEach(fd => { if (rec[fd.k] == null && fd.def != null) rec[fd.k] = fd.def; });
+  if (isNew && col === "sales") {
+    rec.date = rec.date || today(); rec.status = rec.status || "Paid"; rec.payment = rec.payment || "Zelle";
+    const nums = S.sales.map(s => parseInt(String(s.order || "").replace(/\D/g, ""), 10)).filter(n => isFinite(n));
+    rec.order = rec.order || "A" + ((nums.length ? Math.max(...nums) : 0) + 1);
+  }
+  if (isNew && col === "expenses") rec.date = rec.date || today();
+  if (isNew && col === "ideas") { rec.status = rec.status || "Idea"; rec.impact = rec.impact || "Medium"; rec.effort = rec.effort || "Medium"; }
+  editing = { col, id: rec.id || null, rec };
+  document.getElementById("dlgTitle").textContent = (isNew ? "New " : "Edit ") + sc.one;
+  document.getElementById("dlgFields").innerHTML = sc.fields.map(fd => {
+    const id = "f_" + fd.k, v = rec[fd.k] == null ? "" : rec[fd.k];
+    let input;
+    if (fd.t === "select") input = `<select id="${id}" name="${fd.k}">${fd.o.map(o => `<option ${String(v) === o ? "selected" : ""} value="${esc(o)}">${esc(o || "—")}</option>`).join("")}${v && !fd.o.includes(String(v)) ? `<option selected>${esc(v)}</option>` : ""}</select>`;
+    else if (fd.t === "textarea") input = `<textarea id="${id}" name="${fd.k}">${esc(v)}</textarea>`;
+    else input = `<input id="${id}" name="${fd.k}" type="${fd.t || "text"}" ${fd.step ? `step="${fd.step}" inputmode="decimal"` : ""} ${fd.list ? `list="${fd.list}" autocomplete="off"` : ""} ${fd.req ? "required" : ""} value="${esc(v)}">`;
+    return `<div class="f ${fd.full ? "full" : ""}"><label for="${id}">${esc(fd.l)}${fd.req ? " *" : ""}</label>${input}</div>`;
+  }).join("") + (col === "sales" ? `<div class="hint" id="saleHint">Pick a product, size and color from your inventory and the price fills in.</div>` : "")
+    + (col === "customers" ? `<div class="hint">Orders and spending are calculated from Sales using the customer name.</div>` : "");
+  document.getElementById("dlgDelete").hidden = isNew || (mode === "server" && me && me.role !== "owner");
+  dlg.showModal();
+  if (col === "sales") saleHint();
+}
+function saleHint() {
+  const g = k => document.getElementById("f_" + k);
+  const s = { product: g("product").value, size: g("size").value, color: g("color").value };
+  const p = norm(s.product), z = norm(s.size), c = norm(s.color);
+  const exact = S.inventory.find(i => norm(i.product) === p && norm(i.size) === z && norm(i.color) === c);
+  const h = document.getElementById("saleHint"); if (!h) return;
+  if (exact) {
+    const row = invRows().find(r => r.id === exact.id);
+    h.textContent = `In inventory: ${row.onHand} left, list price ${money2(exact.price)}, cost ${money2(exact.cost)}.`;
+    if (!g("price").value) g("price").value = exact.price;
+  } else if (s.product) {
+    h.textContent = S.inventory.some(i => norm(i.product) === p) ? "This size/color combination isn't in inventory, so stock won't update." : "This product isn't in inventory yet. Add it there so stock and profit are tracked.";
+  }
+  const t = N(g("qty").value) * N(g("price").value);
+  if (t) h.textContent += ` Line total: ${money2(t)}.`;
+}
+document.getElementById("dlgFields").addEventListener("input", e => { if (editing && editing.col === "sales" && /^f_(product|size|color|qty|price)$/.test(e.target.id)) saleHint(); });
+document.getElementById("dlgFields").addEventListener("change", e => { if (editing && editing.col === "sales" && /^f_(product|size|color)$/.test(e.target.id)) saleHint(); });
+document.getElementById("dlgCancel").onclick = () => dlg.close();
+document.getElementById("dlgForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const { col, rec } = editing, sc = SCHEMA[col];
+  const out = Object.assign({}, rec);
+  for (const fd of sc.fields) {
+    const el = document.getElementById("f_" + fd.k); let v = el.value.trim();
+    if (fd.req && !v) { el.focus(); toast(fd.l + " is required."); return; }
+    out[fd.k] = fd.t === "number" ? (v === "" ? 0 : N(v)) : v;
+  }
+  if (col === "plans") {
+    const old = rec.tasks || [];
+    out.tasks = String(out.tasksText || "").split("\n").map(x => x.trim()).filter(Boolean).map(t => ({ t, done: !!(old.find(o => o.t === t) || {}).done }));
+    delete out.tasksText;
+    if (!editing.id) { if (S.plans.find(p => p.id === out.month)) { toast("A plan for that month already exists."); return; } out.id = out.month; }
+  }
+  if (col === "customers" && !editing.id) { const ex = S.customers.find(c => norm(c.name) === norm(out.name)); if (ex) out.id = ex.id; }
+  const btn = document.getElementById("dlgSave"); btn.disabled = true;
+  const id = await saveDoc(col, out);
+  btn.disabled = false;
+  if (id) { dlg.close(); toast("Saved"); if (col === "plans") { UI.plan = id; saveUI(); } }
+});
+document.getElementById("dlgDelete").onclick = async () => {
+  const { col, id } = editing;
+  if (!(await confirmBox(`Delete this ${SCHEMA[col].one}? This can't be undone.`))) return;
+  await deleteDoc(col, id); dlg.close(); toast("Deleted");
+};
+function confirmBox(text) {
+  return new Promise(res => { const c = document.getElementById("cfm"); document.getElementById("cfmText").textContent = text; c.returnValue = ""; c.showModal(); c.addEventListener("close", () => res(c.returnValue === "yes"), { once: true }); });
+}
+let toastT;
+function toast(msg) { let t = document.querySelector(".toast"); if (!t) { t = document.createElement("div"); t.className = "toast"; t.setAttribute("role", "status"); } const host = [...document.querySelectorAll("dialog[open]")].pop() || document.body; if (t.parentNode !== host) host.appendChild(t); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2600); }
+
+/* ---------- Events ---------- */
+document.addEventListener("click", async e => {
+  const t = e.target.closest("button, tr[data-id], .card[data-id]"); if (!t) return;
+  const d = t.dataset;
+  if (d.view) { UI.view = d.view; UI.q = ""; UI.month = ""; UI.status = ""; UI.cat = ""; saveUI(); try { history.replaceState(null, "", "#" + d.view); } catch (er) {} render(); window.scrollTo(0, 0); return; }
+  if (d.go) { UI.view = d.go; UI.q = ""; UI.month = ""; UI.cat = ""; UI.status = d.status || ""; saveUI(); render(); window.scrollTo(0, 0); return; }
+  if (d.add) return openForm(d.add);
+  if (d.advance) { if (e.stopPropagation) e.stopPropagation(); const r = S.ideas.find(i => i.id === d.advance); if (r) { await saveDoc("ideas", Object.assign({}, r, { status: d.to })); toast(d.to === "Done" ? "Marked done" : "Moved to In progress"); } return; }
+  if (d.idea) { const ex = S.ideas.find(i => norm(i.title) === norm(d.idea)); if (ex) return openForm("ideas", ex); return openForm("ideas", null, { title: d.idea, area: d.area, impact: "High" }); }
+  if (d.newplan != null) {
+    let m = d.newplan;
+    if (!m) { const ms = S.plans.map(p => p.month).sort(); const last = ms[ms.length - 1]; if (last && last >= thisMonth()) { const [y, mo] = last.split("-").map(Number); const nd = new Date(y, mo, 1); m = nd.getFullYear() + "-" + String(nd.getMonth() + 1).padStart(2, "0"); } else m = thisMonth(); }
+    const prevPlan = S.plans.slice().sort((a, b) => String(b.month).localeCompare(String(a.month)))[0];
+    return openForm("plans", null, { month: m, revenueTarget: prevPlan ? prevPlan.revenueTarget : "", unitsTarget: prevPlan ? prevPlan.unitsTarget : "", budget: prevPlan ? prevPlan.budget : "", tasksText: prevPlan ? (prevPlan.tasks || []).filter(x => !x.done).map(x => x.t).join("\n") : "" });
+  }
+  if (d.plansel) { UI.plan = d.plansel; saveUI(); render(); return; }
+  if (d.edit) { const r = S[d.edit].find(x => x.id === d.eid); if (r) openForm(d.edit, r); return; }
+  if (d.cust) { const c = customersDerived().find(x => x.key === d.cust); return openForm("customers", c && c.rec ? c.rec : null, c && !c.rec ? { name: c.name } : null); }
+  if (d.col && d.id) { const r = S[d.col].find(x => x.id === d.id); if (r) openForm(d.col, r); return; }
+  if (t.id === "exportX") return exportExcel();
+  if (t.id === "backup") return backup();
+  if (t.id === "restore") return document.getElementById("restoreFile").click();
+});
+document.addEventListener("change", async e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.plan != null && t.dataset.task != null) {
+    const p = S.plans.find(x => x.id === t.dataset.plan); if (!p) return;
+    const tasks = (p.tasks || []).map((x, i) => i === +t.dataset.task ? { t: x.t, done: t.checked } : x);
+    await saveDoc("plans", Object.assign({}, p, { tasks })); return;
+  }
+  if (t.id === "hideStock") { UI.hideStock = t.checked; saveUI(); render(); return; }
+  if (t.id === "fMonth") { UI.month = t.value; refreshTable(); }
+  if (t.id === "fStatus") { UI.status = t.value; refreshTable(); }
+  if (t.id === "fCat") { UI.cat = t.value; refreshTable(); }
+  if (t.id === "restoreFile") restore(t.files[0]);
+});
+document.addEventListener("input", e => { if (e.target.id === "q") { UI.q = e.target.value; refreshTable(); } });
+function refreshTable() { const v = VIEWS[UI.view], el = document.getElementById("tbl"); if (v.table && el) el.innerHTML = v.table(); }
+
+/* ---------- Export / backup ---------- */
+async function deliver(filename, data, mime) {
+  let dl = null;
+  try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (e) {}
+  if (dl) {
+    try { await dl.save({ filename, data: new Blob([data], { type: mime }) }); toast("Saved " + filename); }
+    catch (e) { if (e && e.code !== "declined") toast("Couldn't save the file. Try again."); }
+    return;
+  }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type: mime })); a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+}
+function loadXLSX() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return new Promise((res, rej) => { const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"; s.onload = () => res(window.XLSX); s.onerror = rej; document.head.appendChild(s); });
+}
+async function exportExcel() {
+  let X; try { X = await loadXLSX(); } catch (e) { toast("Couldn't load the Excel exporter. Check your connection."); return; }
+  const t = totals(), wb = X.utils.book_new();
+  const add = (name, rows) => X.utils.book_append_sheet(wb, X.utils.json_to_sheet(rows.length ? rows : [{}]), name);
+  add("Main", [
+    { Metric: "Total Revenue", Value: t.revenue }, { Metric: "Total Expenses", Value: t.expenses }, { Metric: "Net Profit", Value: t.net },
+    { Metric: "Gross Profit (after unit cost)", Value: t.gross }, { Metric: "Unpaid (pending)", Value: t.outstanding },
+    { Metric: "Best Selling Product", Value: t.products[0] ? t.products[0].name : "" }, { Metric: "Total Units Sold", Value: t.units }, { Metric: "Total Orders", Value: t.orders },
+    { Metric: "Current Inventory Value", Value: t.stockValue }, { Metric: "Total Inventory Value (Projected gain)", Value: t.projected }]);
+  add("Sales", S.sales.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(s => ({ Date: s.date, "Order #": s.order, Customer: s.customer, Product: s.product, Size: s.size, Color: s.color, Quantity: N(s.qty), "Unit Price": N(s.price), Total: lineTotal(s), "Payment Method": s.payment, "Delivery Status": s.status, Note: s.note })));
+  add("Inventory", invRows().map(i => ({ "Product ID": i.sku, Product: i.product, Size: i.size, Color: i.color, "Original Stock": N(i.stock), "Quantity sold": i.sold, "Current Stock": i.onHand, "Cost Per Unit": N(i.cost), "Selling Price": N(i.price), "Current Stock Value": i.value })));
+  add("Expenses", S.expenses.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(e => ({ Date: e.date, Category: e.category, Description: e.description, Vendor: e.vendor, Amount: N(e.amount), Notes: e.note })));
+  add("Marketing", S.marketing.map(c => ({ Date: c.date, Campaign: c.campaign, Platform: c.platform, "Amount spent": N(c.spent), Reach: N(c.reach), "Followers gained": N(c.followers), "Sales generated": N(c.sales), Profit: N(c.sales) - N(c.spent), Note: c.note })));
+  add("Customer database", customersDerived().map(c => ({ "Customer name": c.name, phone: c.rec ? c.rec.phone : "", Email: c.rec ? c.rec.email : "", "Orders": c.orderCount, "Items": c.units, "Spent": c.spent, Notes: c.rec ? c.rec.note : "" })));
+  add("Suppliers", S.suppliers.map(s => ({ "Supplier Name": s.name, Product: s.product, "Cost per Item": N(s.cost), "Lead Time": s.lead, Location: s.location, "Contact Info": s.contact, Notes: s.note })));
+  add("Monthly plans", S.plans.slice().sort((a, b) => String(a.month).localeCompare(String(b.month))).map(p => ({ Month: p.month, Theme: p.theme, "Revenue target": N(p.revenueTarget), "Actual revenue": monthStats(p.month).rev, "Units target": N(p.unitsTarget), "Actual units": monthStats(p.month).units, Tasks: (p.tasks || []).map(x => (x.done ? "[x] " : "[ ] ") + x.t).join("\n"), Focus: p.focus, Review: p.review })));
+  add("Improvements", S.ideas.map(i => ({ Improvement: i.title, Area: i.area, Status: i.status, Impact: i.impact, Effort: i.effort, Owner: i.owner, "Target date": i.due, Details: i.detail })));
+  const buf = X.write(wb, { bookType: "xlsx", type: "array" });
+  await deliver(`Club-1962-${today()}.xlsx`, buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+async function backup() { await deliver(`club1962-backup-${today()}.json`, JSON.stringify(Object.fromEntries(COLS.map(c => [c, S[c]])), null, 1), "application/json"); }
+async function restore(file) {
+  if (!file) return;
+  let data; try { data = JSON.parse(await file.text()); } catch (e) { toast("That file isn't a valid backup."); return; }
+  const n = COLS.reduce((a, c) => a + (Array.isArray(data[c]) ? data[c].length : 0), 0);
+  if (!n) { toast("No Club 1962 records found in that file."); return; }
+  if (!(await confirmBox(`Load ${n} records from ${file.name}? Records with the same ID are replaced; others are kept.`))) return;
+  if (mode === "server") {
+    try { const r = await api("POST", "/import", Object.fromEntries(COLS.map(c => [c, data[c] || []]))); toast(`Loaded ${r.data.count} records`); await loadServer(); }
+    catch (e) { toast(e.message); }
+  } else if (mode === "local") { COLS.forEach(c => { (data[c] || []).forEach(r => { const i = S[c].findIndex(x => x.id === r.id); if (i >= 0) S[c][i] = r; else S[c].push(r); }); }); persistLocal(); render(); toast(`Loaded ${n} records`); }
+  else { let ok = 0; for (const c of COLS) for (const r of (data[c] || [])) { if (await saveDoc(c, r)) ok++; else break; } toast(`Loaded ${ok} records`); }
+  document.getElementById("restoreFile").value = "";
+}
+
+/* ---------- Account (hosted version) ---------- */
+const acctDlg = document.getElementById("acct");
+let installEvt = null;
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; });
+async function openAccount() {
+  if (!me) return;
+  let users = [];
+  if (me.role === "owner") { try { users = (await api("GET", "/users")).data.users; } catch (e) {} }
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  document.getElementById("acctBody").innerHTML = `
+    <div class="acct-sec"><h4>Signed in</h4><div class="user-row"><span><b>${esc(me.name)}</b> <span class="muted">@${esc(me.username)}</span> <span class="chip ${me.role === "owner" ? "accent" : ""}">${me.role === "owner" ? "Owner" : "Staff"}</span></span><button type="button" class="btn sm" data-acct="logout">Sign out</button></div></div>
+    <div class="acct-sec"><h4>Install on this phone</h4>
+      ${installEvt ? `<button type="button" class="btn primary" data-acct="install">Install Club 1962 app</button>` : `<p class="note" style="margin:0">${isIOS ? "In Safari, tap Share, then Add to Home Screen." : "In Chrome, open the ⋮ menu and tap Install app (or Add to Home screen)."}</p>`}</div>
+    <div class="acct-sec"><h4>Change my password</h4>
+      <div class="row2"><div class="f"><label for="pwCur">Current password</label><input id="pwCur" type="password" autocomplete="current-password"></div>
+      <div class="f"><label for="pwNew">New password (8+ characters)</label><input id="pwNew" type="password" autocomplete="new-password"></div></div>
+      <div><button type="button" class="btn" data-acct="pw">Save password</button></div></div>
+    ${me.role === "owner" ? `<div class="acct-sec"><h4>Staff accounts</h4>
+      ${users.map(u => `<div class="user-row"><span><b>${esc(u.name)}</b> <span class="muted">@${esc(u.username)}</span> <span class="chip ${u.role === "owner" ? "accent" : ""}">${u.role === "owner" ? "Owner" : "Staff"}</span>${u.active ? "" : ` <span class="chip bad">Switched off</span>`}</span>
+        ${u.id === me.id ? `<span class="note">You</span>` : `<span style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" class="btn sm" data-acct="reset" data-uid="${esc(u.id)}">Reset password</button><button type="button" class="btn sm ${u.active ? "danger" : ""}" data-acct="toggle" data-uid="${esc(u.id)}" data-on="${u.active ? 0 : 1}">${u.active ? "Switch off" : "Switch on"}</button></span>`}</div>
+        <div class="row2" id="reset-${esc(u.id)}" hidden><div class="f"><label for="rp-${esc(u.id)}">New password for ${esc(u.name)}</label><input id="rp-${esc(u.id)}" type="password" autocomplete="new-password"></div><div style="align-self:end"><button type="button" class="btn" data-acct="setpw" data-uid="${esc(u.id)}">Set password</button></div></div>`).join("")}
+      <p class="note" style="margin:0">Add someone (they sign in with this username and password):</p>
+      <div class="row2"><div class="f"><label for="nuName">Name</label><input id="nuName"></div><div class="f"><label for="nuUser">Username</label><input id="nuUser" autocapitalize="none"></div>
+      <div class="f"><label for="nuPass">Password (8+ characters)</label><input id="nuPass" type="password" autocomplete="new-password"></div><div class="f"><label for="nuRole">Role</label><select id="nuRole"><option value="staff">Staff</option><option value="owner">Owner</option></select></div></div>
+      <div><button type="button" class="btn primary" data-acct="adduser">Add account</button></div>
+      <p class="note" style="margin:0">Staff can log sales, stock, expenses and plans. Only owners can delete records, restore backups and manage accounts.</p></div>` : ""}`;
+  if (!acctDlg.open) acctDlg.showModal();
+}
+document.getElementById("acctBtn").onclick = openAccount;
+document.getElementById("acctClose").onclick = () => acctDlg.close();
+document.getElementById("acctBody").addEventListener("click", async e => {
+  const b = e.target.closest("[data-acct]"); if (!b) return;
+  const a = b.dataset.acct, v = id => document.getElementById(id).value;
+  try {
+    if (a === "logout") { await api("POST", "/logout"); acctDlg.close(); try { const k = await caches.keys(); await Promise.all(k.filter(x => x.startsWith("c62-data")).map(x => caches.delete(x))); } catch (er) {} showLogin(); return; }
+    if (a === "install") { installEvt.prompt(); installEvt = null; return; }
+    if (a === "pw") { await api("POST", "/me/password", { current: v("pwCur"), next: v("pwNew") }); toast("Password changed"); return openAccount(); }
+    if (a === "reset") { const el = document.getElementById("reset-" + b.dataset.uid); el.hidden = !el.hidden; return; }
+    if (a === "setpw") { await api("PATCH", "/users/" + b.dataset.uid, { password: v("rp-" + b.dataset.uid) }); toast("Password set"); return openAccount(); }
+    if (a === "toggle") { await api("PATCH", "/users/" + b.dataset.uid, { active: b.dataset.on === "1" }); return openAccount(); }
+    if (a === "adduser") { await api("POST", "/users", { name: v("nuName"), username: v("nuUser"), password: v("nuPass"), role: v("nuRole") }); toast("Account added"); return openAccount(); }
+  } catch (ex) { toast(ex.message); }
+});
+if (!window.claude && /^https?:$/.test(location.protocol) && "serviceWorker" in navigator) window.addEventListener("load", () => { navigator.serviceWorker.register("/sw.js").catch(() => {}); });
+
+init();
+})();

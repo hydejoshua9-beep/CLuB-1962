@@ -1,0 +1,20 @@
+{
+  "name": "club-1962-hq",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Club 1962 HQ: sales, stock, expenses, customers and monthly plans for the Club 1962 clothing brand",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "icons": "node scripts/make-icons.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.0"
+  }
+}
